@@ -8,7 +8,7 @@
  *
  * You may use this file under AGPLv3 if you release your project under
  * a compatible open source license. For closed source or commercial use,
- * you must obtain a commercial license from [Your Name or Company].
+ * you must obtain a commercial license from NullPops.
  *
  * See the LICENSE file for details.
  */
