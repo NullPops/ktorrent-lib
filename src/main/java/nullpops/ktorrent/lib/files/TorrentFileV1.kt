@@ -1,4 +1,5 @@
 /*
+ *
  * Copyright (c) 2025 NullPops
  *
  * This file is part of ktorrent-lib.
@@ -8,20 +9,17 @@
  *
  * You may use this file under AGPLv3 if you release your project under
  * a compatible open source license. For closed source or commercial use,
- * you must obtain a commercial license from NullPops.
+ * you must obtain a commercial license from [Your Name or Company].
  *
  * See the LICENSE file for details.
  */
 
-package nullpops.ktorrent.lib
+package nullpops.ktorrent.lib.files
 
+import nullpops.ktorrent.lib.Ext.sanitize
 import nullpops.ktorrent.lib.bencode.BencodeDict
-import nullpops.ktorrent.lib.bencode.BencodeInt
-import nullpops.ktorrent.lib.bencode.BencodeList
 import nullpops.ktorrent.lib.bencode.BencodeString
-import nullpops.ktorrent.lib.bencode.BencodeValue
-import nullpops.ktorrent.lib.bencode.bencode
-import nullpops.ktorrent.lib.bencode.parseBencodeFile
+import nullpops.ktorrent.lib.data.TorrentFileEntry
 import java.io.File
 import java.io.FileInputStream
 import java.io.RandomAccessFile
@@ -30,70 +28,18 @@ import java.security.MessageDigest
 import java.util.Collections
 
 /**
- * Sanitize a filename or directory name for cross-platform use.
- *
- * - Replaces reserved/unsafe characters with '_'
- * - Trims whitespace and trailing dots/spaces (Windows)
- * - Ensures non-empty and not "." or ".."
- * - Truncates by UTF-8 byte length without splitting code points
- */
-fun String.sanitize(maxBytes: Int = 255): String {
-    val unsafe = Regex("""[<>:"/\\|?*\x00-\x1F]""")
-    var sanitized = replace(unsafe, "_")
-        .trim()
-        .replace(Regex("""\s+"""), " ")
-        .trimEnd('.', ' ')
-
-    if (sanitized.isEmpty() || sanitized == "." || sanitized == "..") sanitized = "_torrent"
-
-    val utf8 = sanitized.encodeToByteArray()
-    if (utf8.size <= maxBytes) return sanitized
-
-    var cut = sanitized.length
-    while (cut > 0 && sanitized.substring(0, cut).encodeToByteArray().size > maxBytes) cut--
-    sanitized = sanitized.substring(0, cut).trimEnd('.', ' ')
-    if (sanitized.isEmpty() || sanitized == "." || sanitized == "..") sanitized = "_torrent"
-    return sanitized
-}
-
-data class TorrentFileEntry(
-    /** Path inside the torrent (slash-separated for multi-file torrents). */
-    val path: String,
-    /** Length of this file in bytes. */
-    val length: Long
-)
-
-enum class TorrentVersion { V1, V2 }
-
-/**
  * Parsed .torrent with helpers for size, files, and integrity checks.
  */
-data class TorrentFile(
-    /** Primary announce URL if present. */
-    val announce: String?,
-    /** Raw info dictionary (bencoded map). */
-    val info: Map<String, BencodeValue>,
-    /** Root bencode dictionary of the .torrent file. */
-    val raw: BencodeDict,
-    /** Piece length in bytes. */
-    val pieceLength: Int,
-    /** SHA-1(info) for v1 torrents. */
-    val infoHash: ByteArray,
-    /** True if this is a multi-file torrent. */
-    val hasFiles: Boolean,
-) {
+data class TorrentFileV1(val file: File) : TorrentFile(file) {
 
     /** Torrent name (directory for multi-file, file name for single-file). */
-    val name: String by lazy { info.getString("name") }
+    private val name: String by lazy { info.getString("name") }
 
     /** Raw 20-byte SHA-1 piece hashes concatenated (v1). */
     val piecesRaw: ByteArray by lazy { info.getBytes("pieces") }
 
     /** Number of pieces (v1). */
     val pieceCount: Int by lazy { piecesRaw.size / 20 }
-
-    /** Torrent version—throws for unsupported v2. */
-    val version: TorrentVersion by lazy { detectVersion(info) }
 
     /** Entries (files) described by the torrent. */
     val entries: List<TorrentFileEntry> by lazy { parseEntries() }
@@ -115,7 +61,7 @@ data class TorrentFile(
      * @return List of created/existing File handles in the same order as [entries].
      */
     fun prepareFiles(
-        baseOutputDir: File = File("./data/out"),
+        baseOutputDir: File = File("./data/"),
         preAllocate: Boolean = false
     ): List<File> {
         val rootDir = File(baseOutputDir, name.sanitize())
@@ -161,12 +107,10 @@ data class TorrentFile(
      * @param files Files returned from [prepareFiles]. They must cover the torrent payload in the same order as [entries].
      * @param onPieceChecked Optional callback invoked after each piece: (index, isValid) -> Unit.
      */
-    fun checkIntegrity(
-        files: List<File>,
-        onPieceChecked: ((index: Int, isValid: Boolean) -> Unit)? = null
+    override fun checkIntegrity(
+        onPieceChecked: ((index: Int, isValid: Boolean) -> Unit)?
     ) {
-        require(version == TorrentVersion.V1) { "Only v1 torrents are supported for integrity check." }
-
+        val files = prepareFiles()
         // Concatenate all files into a single stream in order.
         val streams = files.map { FileInputStream(it) }
         val sha1 = MessageDigest.getInstance("SHA-1")
@@ -209,12 +153,7 @@ data class TorrentFile(
     /** Bytes remaining to download/validate. */
     fun leftBytes(): Long = (totalSizeBytes() - validBytes()).coerceAtLeast(0)
 
-    /** Completion percentage in [0.0, 100.0]. */
-    fun completionPercent(): Double {
-        val total = totalSizeBytes().toDouble()
-        if (total <= 0.0) return 0.0
-        return (validBytes() / total) * 100.0
-    }
+
 
     /** Count of pieces marked valid. */
     fun validPieceCount(): Int = pieceValidity.values.count { it }
@@ -222,20 +161,9 @@ data class TorrentFile(
     /** Count of pieces marked invalid. (Unchecked pieces are not counted.) */
     fun invalidPieceCount(): Int = pieceValidity.values.count { !it }
 
-    // ---------- Helpers ----------
-
-    private fun detectVersion(info: Map<String, BencodeValue>): TorrentVersion {
-        val hasV1 = "pieces" in info
-        val hasV2 = "file tree" in info
-        return when {
-            hasV2 -> throw IllegalArgumentException("v2 torrents are not supported yet.")
-            hasV1 -> TorrentVersion.V1
-            else -> throw IllegalArgumentException("Unknown torrent version: info dict has neither 'pieces' nor 'file tree'.")
-        }
-    }
 
     private fun parseEntries(): List<TorrentFileEntry> {
-        if (hasFiles) {
+        if (!singleFile) {
             val files = info.getList("files")
             return files.map { fileVal ->
                 val fileDict = (fileVal as BencodeDict).value
@@ -263,57 +191,33 @@ data class TorrentFile(
         }
     }
 
-    // ---------- Optional v2 info-hash helper (pre-emptive) ----------
-
-    /**
-     * Returns SHA-256(bencode(info)) per BEP52 (not used by v1 clients).
-     * Throws if this is not a v2 torrent map (caller responsibility).
-     */
-    fun infoHashV2(): ByteArray {
-        val infoDict = BencodeDict(info)
-        val encoded = bencode(infoDict)
-        return MessageDigest.getInstance("SHA-256").digest(encoded)
+    override fun parse() : TorrentFile {
+        return TorrentFileV1(file)
     }
 
-    companion object {
-        /**
-         * Parse a .torrent file into [TorrentFile].
-         */
-        fun parse(file: File): TorrentFile {
-            val root = parseBencodeFile(file) as BencodeDict
-            val announce = (root.value["announce"] as? BencodeString)?.asUtf8()
+    /** Completion percentage in [0.0, 100.0]. */
+    override fun completionPercentage(): Double {
+        val total = totalSizeBytes().toDouble()
+        if (total <= 0.0) return 0.0
+        return (validBytes() / total) * 100.0
+    }
 
-            val info = (root.value["info"] as? BencodeDict)?.value
-                ?: throw IllegalArgumentException("Missing 'info' field in torrent.")
-
-            val infoBytes = bencode(BencodeDict(info))
-            val infoHash = MessageDigest.getInstance("SHA-1").digest(infoBytes)
-            val pieceLength = info.getLong("piece length").toInt()
-            val isMulti = "files" in info
-
-            return TorrentFile(
-                announce = announce,
-                info = info,
-                raw = root,
-                pieceLength = pieceLength,
-                infoHash = infoHash,
-                hasFiles = isMulti
-            )
-        }
+    override fun name(): String {
+        return name
     }
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (javaClass != other?.javaClass) return false
 
-        other as TorrentFile
+        other as TorrentFileV1
 
         if (pieceLength != other.pieceLength) return false
-        if (hasFiles != other.hasFiles) return false
+        if (singleFile != other.singleFile) return false
         if (announce != other.announce) return false
         if (info != other.info) return false
-        if (raw != other.raw) return false
-        if (!infoHash.contentEquals(other.infoHash)) return false
+        if (dict != other.dict) return false
+        if (!infoBytesHash.contentEquals(other.infoBytesHash)) return false
         if (pieceValidity != other.pieceValidity) return false
         if (pieceCount != other.pieceCount) return false
         if (name != other.name) return false
@@ -326,11 +230,11 @@ data class TorrentFile(
 
     override fun hashCode(): Int {
         var result = pieceLength
-        result = 31 * result + hasFiles.hashCode()
+        result = 31 * result + singleFile.hashCode()
         result = 31 * result + (announce?.hashCode() ?: 0)
         result = 31 * result + info.hashCode()
-        result = 31 * result + raw.hashCode()
-        result = 31 * result + infoHash.contentHashCode()
+        result = 31 * result + dict.hashCode()
+        result = 31 * result + infoBytesHash.contentHashCode()
         result = 31 * result + pieceValidity.hashCode()
         result = 31 * result + pieceCount
         result = 31 * result + name.hashCode()
@@ -340,21 +244,3 @@ data class TorrentFile(
         return result
     }
 }
-
-// -------------------- Bencode access helpers --------------------
-
-private fun Map<String, BencodeValue>.getString(key: String): String =
-    (this[key] as? BencodeString)?.asUtf8()
-        ?: error("Expected bencode string for key '$key'.")
-
-private fun Map<String, BencodeValue>.getBytes(key: String): ByteArray =
-    (this[key] as? BencodeString)?.value
-        ?: error("Expected bencode byte string for key '$key'.")
-
-private fun Map<String, BencodeValue>.getLong(key: String): Long =
-    (this[key] as? BencodeInt)?.value
-        ?: error("Expected bencode int for key '$key'.")
-
-private fun Map<String, BencodeValue>.getList(key: String): List<BencodeValue> =
-    (this[key] as? BencodeList)?.value
-        ?: error("Expected bencode list for key '$key'.")

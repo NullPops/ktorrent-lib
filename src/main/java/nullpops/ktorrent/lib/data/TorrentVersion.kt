@@ -1,0 +1,19 @@
+/*
+ *
+ * Copyright (c) 2025 NullPops
+ *
+ * This file is part of ktorrent-lib.
+ *
+ * Licensed under the GNU Affero General Public License v3.0 (AGPLv3)
+ * or a Commercial License.
+ *
+ * You may use this file under AGPLv3 if you release your project under
+ * a compatible open source license. For closed source or commercial use,
+ * you must obtain a commercial license from [Your Name or Company].
+ *
+ * See the LICENSE file for details.
+ */
+
+package nullpops.ktorrent.lib.data
+
+enum class TorrentVersion { V1, V2 }
